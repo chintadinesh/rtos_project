@@ -216,3 +216,7 @@ void CAN0_SendData(uint8_t data[7]){
 // in this case there is just one type, but you could accept multiple ID types
   CAN0_Setup_Message_Object(XMT_ID, NULL, 7, data, XMT_ID, MSG_OBJ_TYPE_TX);
 }
+
+void CAN0_send_process_data(int len, uint8_t* data){
+  CAN0_Setup_Message_Object(XMT_ID, NULL, len, data, XMT_ID, MSG_OBJ_TYPE_TX);
+}

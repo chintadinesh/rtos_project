@@ -131,9 +131,54 @@ PendSV_Handler                 ; 1) Saves R0-R3, R12, LR, PC, PSR
         IMPORT    OS_Sleep
         IMPORT    OS_Time
         IMPORT    OS_AddThread
+        IMPORT    OS_AddThreadP
 
 SVC_Handler
-; put your Lab 5 code here
+    LDR     R12, [SP, #24]       ; Return address
+    LDRH    R12, [R12, #-2]      ; SVC instruction is 2 bytes
+    BIC     R12, #0xFF00         ; Extract ID in R12
+    LDM     SP, {R0-R3}          ; Get any parameters
+    PUSH    {LR}                 ; Save return address
+
+    ; Call OS routine by ID
+    CMP     R12, #0
+    BEQ		ID0
+    CMP     R12, #1
+    BEQ     ID1
+    CMP     R12, #2
+    BEQ     ID2
+    CMP     R12, #3
+    BEQ     ID3
+    CMP     R12, #4
+    BEQ     ID4
+    B       SVC_Exit
+
+ID0
+    BL      OS_Id
+    B       SVC_Exit
+
+ID1
+    BL      OS_Kill
+    B       SVC_Exit
+
+ID2
+    BL      OS_Sleep
+    B       SVC_Exit
+
+ID3
+    BL      OS_Time
+    B       SVC_Exit
+
+ID4
+    LDR     R3, =RunPt         ; currently running thread
+    LDR     R3, [R3]           ; R3 = value of RunPt
+    LDR     R3, [R3, #12]      ; R3 = value of RuntPt->pcb
+    BL      OS_AddThreadP
+    B       SVC_Exit
+
+SVC_Exit
+    POP     {LR}                 ; Get return address
+    STR     R0, [SP]             ; Store return value
     BX      LR                   ; Return from exception
 
 

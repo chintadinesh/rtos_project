@@ -29,12 +29,13 @@
 #include "../RTOS_Labs_common/eFile.h"
 #include "../RTOS_Labs_common/heap.h"
 
+#include <string.h>
 
 // OS component definitions
 #define JITTERSIZE1 64
 #define JITTERSIZE2 64
-#define NUMTHREADS  15        // maximum number of threads
-#define MAXFIFOSIZE 2048      // maximum size of FIFO buffer
+//#define MAXFIFOSIZE 2048      // maximum size of FIFO buffer
+#define MAXFIFOSIZE 32      // maximum size of FIFO buffer
 #define PF1       (*((volatile uint32_t *)0x40025008))	
 #define PF2       (*((volatile uint32_t *)0x40025010))	
 #define PF3       (*((volatile uint32_t *)0x40025020))
@@ -43,6 +44,7 @@
 // OS component declarations
 uint32_t OSTimeMs = 0;                  // system time in msec
 tcbType tcbs[NUMTHREADS];				        // statically allocating memory for tcbs
+pcbType pcbs[NUMPROCESS];               // statically allocating memor for pcbs
 tcbType *RunPt = 0;                     // pointer to the currently runing active thread
 tcbType *FreePt = 0;					          // pointer to the next available free thread
 int32_t Stacks[NUMTHREADS][STACKSIZE];  // threads with id = n will have stack at position n
@@ -59,12 +61,6 @@ Sema4Type MailboxDataValid;             // 1 if data available, 0 if no data
 
 // Performance Measurements
 uint32_t NumKilled;
-uint32_t NumSamples;
-uint32_t DataLost;
-uint32_t FilterWork;
-uint32_t PIDWork;
-uint32_t x[64];
-uint32_t y[64];
 int32_t MaxJitter1 = 0;             // largest time jitter between interrupts in usec
 uint32_t const JitterSize1=JITTERSIZE1;
 uint32_t JitterHistogram1[JITTERSIZE1]={0,};
@@ -73,7 +69,12 @@ uint32_t const JitterSize2=JITTERSIZE2;
 uint32_t JitterHistogram2[JITTERSIZE2]={0,};
 uint32_t CPUUtil;                   // calculated CPU utilization (in 0.01%)
 
-int32_t MaxJitter2;             // largest time jitter between interrupts in usec
+// let the user take care of it
+static Sema4Type  pcb_sem;
+static Sema4Type  tcb_sem;
+
+static uint32_t pcb_curr_traverse_id = 0;
+static uint32_t tcb_curr_traverse_id = 0;
 
 // External handlers for button switches
 void (*SW1_Task)(void);        // application function executed by button interrupt handler
@@ -95,6 +96,11 @@ void Scheduler(void) {
   // Search for highest priority thread not blocked or sleeping
   pt = bestPt = RunPt;
   do {
+    if(pt->is_migrating) {// don't schdule processes marked for migration
+      pt = pt->next;
+      continue;
+    }
+
     if (pt->blocked == NULL && pt->priority < bestPriority && pt->sleep <= OSTimeMs) {
       bestPriority = pt->priority;
       bestPt = pt;
@@ -115,7 +121,7 @@ unsigned long OS_LockScheduler(void){
   return old;
 };
 
-//******** OS_UnLockScheduler *************** 
+//******** OS_LockScheduler *************** 
 // Resume foreground thread switching.
 // Inputs:  previous
 // Outputs: none
@@ -156,6 +162,9 @@ void InitTCBPool(void) {
   tcbs[0].previous = NULL;
   tcbs[0].id = 0;
   tcbs[0].blockedTime = 0xFFFFFFFF;
+  tcbs[0].pcb = NULL;
+  tcbs[0].is_migrating = 0;
+
 
   // Initialize all middle elements
   for (int i = 1; i < NUMTHREADS - 1; i++) {
@@ -164,6 +173,8 @@ void InitTCBPool(void) {
     tcbs[i].previous = &tcbs[i - 1];
     tcbs[i].id = i;
     tcbs[i].blockedTime = 0xFFFFFFFF;
+    tcbs[i].pcb = NULL;
+    tcbs[i].is_migrating = 0;
   }
 
   // Initialize last element
@@ -172,10 +183,19 @@ void InitTCBPool(void) {
   tcbs[NUMTHREADS - 1].previous = &tcbs[NUMTHREADS - 2];
   tcbs[NUMTHREADS - 1].id = NUMTHREADS - 1;
   tcbs[NUMTHREADS - 1].blockedTime = 0xFFFFFFFF;
+  tcbs[NUMTHREADS - 1].pcb = NULL;
+  tcbs[NUMTHREADS - 1].is_migrating = 0;
 
   // All tcbs are free at the beginning
   FreePt = &tcbs[NUMTHREADS - 1];
 };
+
+void InitPCBPool(void) {
+  for (int i = 0; i < NUMPROCESS; i++) 
+    pcbs[i].id = -1;
+
+  return;
+}
 
 /*----------------------------------------------------------------------------
   PortF Initialization (LED)
@@ -202,6 +222,12 @@ void OS_Init(void){
   UART_Init();  // serial I/O for interpreter
   OS_ClearMsTime(); // start a periodic interrupt to maintain time
   InitTCBPool();    // initialize pool of TCBs
+  InitPCBPool();    // initialize pool of PCBs
+
+  // note that  there could only be one traverser at a time
+  // be careful with this
+  OS_InitSemaphore(&pcb_sem, 1);
+  OS_InitSemaphore(&tcb_sem, 1);
 };
 
 //******** OS_Launch *************** 
@@ -215,7 +241,7 @@ void OS_Init(void){
 void OS_Launch(uint32_t theTimeSlice){
 	SYSPRI3 = SYSPRI3 ^= 0x00E00000; // Configure PendSV interrupt (priority 6)
   SysTick_Init(theTimeSlice);      // Initialize Configure SysTick interrupt (priority 7)
-  Heap_Init();                     // Initialize Heap
+  Heap_Init();                     // Initialize the heap
   StartOS();
 };
 
@@ -269,6 +295,9 @@ void OS_Signal(Sema4Type *semaPt){
     pt = RunPt;
     bestPt = NULL;
     do {
+      if(pt->is_migrating) // don't consider migrating threads
+        continue;
+
       if (pt->blocked == semaPt && (pt->priority < bestPriority || (pt->priority == bestPriority && pt->blockedTime < bestTime))) {
         bestPriority = pt->priority;
         bestTime = pt->blockedTime;
@@ -443,6 +472,78 @@ int OS_AddThread(void(*task)(void),
   return 1;   // success
 };
 
+//******** OS_AddThreadP *************** 
+// add a modified foregound thread (with a parent process) to the scheduler
+// Inputs: pointer to a void/void foreground task
+//         number of bytes allocated for its stack
+//         priority, 0 is highest, 5 is the lowest
+//         pointer to parent process control block
+//         pointer to process data section in memory
+// Outputs: 1 if successful, 0 if this thread can not be added
+// stack size must be divisable by 8 (aligned to double word boundary)
+int OS_AddThreadP(void(*task)(void), 
+    uint32_t stackSize, uint32_t priority, pcbType *pcb){
+  int32_t status;
+  
+  // Obtain free thread from the pool
+  status = StartCritical();
+  tcbType *newThreadPt = GetFreeThread();
+  if (newThreadPt == NULL) {  // no free threads available
+    EndCritical(status);
+    return 0;
+  }
+  EndCritical(status);
+
+  // Initialize stack
+  SetInitialStack(newThreadPt->id);
+  Stacks[newThreadPt->id][STACKSIZE - 2] = (int32_t)(task);   // PC
+  Stacks[newThreadPt->id][STACKSIZE - 11] = (int32_t)(pcb->data);  // R9
+
+  // Configure new thread
+  newThreadPt->sp = &Stacks[newThreadPt->id][STACKSIZE - 16]; // set sp parameter in TCB
+  newThreadPt->priority = priority;   // set priority parameter in TCB
+  newThreadPt->sleep = 0;             // set sleep parameter in TCB
+  newThreadPt->blocked = NULL;        // set blocked parameter in TCB
+  newThreadPt->pcb = pcb;             // set parent process parameter in TCB
+
+  // Update parent process
+  status = StartCritical();
+  newThreadPt->pcb->threads += 1;       // increase active thread count
+
+  // Initialize/Update Round-Robin circular list
+  if (RunPt == 0) {   // first and only thread
+    newThreadPt->next = newThreadPt;
+    newThreadPt->previous = newThreadPt;
+    RunPt = newThreadPt;
+  }
+  else {
+    // Update next pointers
+    newThreadPt->next = RunPt->next;
+    RunPt->next = newThreadPt;
+    // Update previous pointers
+    newThreadPt->previous = RunPt;
+    newThreadPt->next->previous = newThreadPt;
+  }
+  EndCritical(status);
+
+  return 1;
+}
+
+//******** GetFreeProcess *************** 
+// Helper function for OS_AddProcess(). Obtain a free process.
+// Inputs:  none
+// Outputs: pointer to free tcb
+pcbType* GetFreeProcess(void){
+  // Loop through pool
+  for (int i = 0; i < NUMPROCESS; i++) {
+    if (pcbs[i].threads == 0) {
+      return &pcbs[i];      // free process
+    }
+  }
+
+  return NULL;    // no free process available
+}
+
 //******** OS_AddProcess *************** 
 // add a process with foregound thread to the scheduler
 // Inputs: pointer to a void/void entry point
@@ -453,12 +554,44 @@ int OS_AddThread(void(*task)(void),
 // Outputs: 1 if successful, 0 if this process can not be added
 // This function will be needed for Lab 5
 // In Labs 2-4, this function can be ignored
+/*
+int OS_AddProcess(void(*entry)(void), void *text, void *data, 
+  unsigned long stackSize, unsigned long priority,
+  char fl_name[10]){
+  */
 int OS_AddProcess(void(*entry)(void), void *text, void *data, 
   unsigned long stackSize, unsigned long priority){
-  // put Lab 5 solution here
 
+  int32_t status = StartCritical();
 
-  return 0; // replace this line with Lab 5 solution
+  // Obtain free process from the pool
+  pcbType *newProcessPt = GetFreeProcess();
+  if (newProcessPt == NULL) {   // no free process available
+    EndCritical(status);
+    return 0;
+  }
+
+  // Configure new process
+  newProcessPt->threads = 0;
+  newProcessPt->text = text;
+  newProcessPt->data = data;
+  newProcessPt->id = OS_get_pcb_id(newProcessPt); 
+  OS_InitSemaphore(&newProcessPt->io_sema, 1);
+  memset(newProcessPt->fl_name, 0, OS_PCB_FL_NAME_LEN);
+  strcpy(newProcessPt->fl_name, "root");
+
+  // Add initial thread
+  if (!OS_AddThreadP(entry, stackSize, priority, newProcessPt)) {
+    newProcessPt->threads = 0;
+    newProcessPt->text = NULL;
+    newProcessPt->data = NULL;
+    newProcessPt->id = -1;
+    newProcessPt->io_sema.value = 0;
+    memset(newProcessPt->fl_name, 0, OS_PCB_FL_NAME_LEN);
+    return 0;   // error
+  }
+
+  return 1;
 };
 
 
@@ -535,12 +668,6 @@ void GPIOPortF_Handler(void){
     SW2_Task();
   }
 };
-
-void OS_DisarmSW2Task(void){
-  int32_t status = StartCritical();
-  GPIO_PORTF_IM_R &= ~0x01;          // (f) disarm interrupt on PF0
-  EndCritical(status);
-}
 
 //******** OS_AddSW1Task *************** 
 // add a background task to run whenever the SW1 (PF4) button is pushed
@@ -678,11 +805,31 @@ void PutFreeThread(tcbType *currentPt) {
 void OS_Kill(void){
   DisableInterrupts();
 
+  // Check if thread from a  process
+  if (RunPt->pcb != NULL) {
+    RunPt->pcb->threads -= 1;
+    if (RunPt->pcb->threads == 0) {
+      // Add process to free pool
+      RunPt->pcb->threads = 0;
+      Heap_Free(RunPt->pcb->text);
+      RunPt->pcb->text = NULL;
+      Heap_Free(RunPt->pcb->data);
+      RunPt->pcb->data = NULL;
+      RunPt->pcb->id = -1;
+      memset(RunPt->pcb->fl_name, 0, OS_PCB_FL_NAME_LEN);
+    }
+  }
+
   // Add thread to free pool
   PutFreeThread(RunPt);
   NumKilled++;
 
   OS_Suspend();         // perform a context switch
+
+  // Check if SVC ISR
+  if (SYSHNDCTRL&0x00000080) {
+    return; // return to finalize interrupt
+  }
 
   for(;;){};        // can not return
 }; 
@@ -993,3 +1140,208 @@ void OS_JitterSample(int work, uint32_t period, int id) {
     LastTimeMs2 = thisTimeMs;
   }
 };
+
+/*
+Return the pcb given the pcb_id
+*/
+pcbType* OS_get_pcb(int pcb_id){
+  if(pcb_id >= NUMPROCESS)
+    return NULL;
+
+  return &pcbs[pcb_id];
+}
+
+// return -1 on failure
+int OS_get_pcb_id(pcbType* pcb){
+  for(int pcb_id = 0; 
+        pcb_id < NUMPROCESS; 
+        pcb_id++){
+
+    if((pcbs + pcb_id) == pcb)
+      return pcb_id;
+  }
+
+  return -1;
+}
+
+
+
+// initilize the pcb_walker to the first process in the list
+void OS_pcb_init_walker(pcbType** pcb_walker_ptr){
+
+  OS_Wait(&pcb_sem);
+
+  pcbType* pcb_ptr;
+
+  for(pcb_curr_traverse_id = 0; 
+      pcb_curr_traverse_id < NUMPROCESS; 
+      pcb_curr_traverse_id++){
+
+    pcb_ptr = &pcbs[pcb_curr_traverse_id];
+
+    if(pcb_ptr->threads != 0){
+      *pcb_walker_ptr = pcb_ptr;
+      goto ret;
+    }
+  }
+
+  *pcb_walker_ptr = NULL;
+  pcb_curr_traverse_id = 0;
+  OS_Signal(&pcb_sem);
+
+ret:
+  return;
+}
+
+
+// go to the next valid pcb and set the passed pointer to it
+void OS_pcb_walk(pcbType** pcb_walker_ptr){
+
+  //OS_Wait(&pcb_sem);
+
+  pcbType* pcb_ptr;
+
+  for(pcb_curr_traverse_id++; // not incremented when getting out of prev itr
+      pcb_curr_traverse_id < NUMPROCESS; 
+      pcb_curr_traverse_id++){
+
+    pcb_ptr = &pcbs[ pcb_curr_traverse_id ];
+
+    if(pcb_ptr->threads != 0){
+      *pcb_walker_ptr = pcb_ptr;
+      goto ret;
+    }
+  }
+
+  *pcb_walker_ptr = NULL;
+  pcb_curr_traverse_id= 0;
+  OS_Signal(&pcb_sem);
+
+ret:
+  return;
+}
+
+pcbType* OS_get_pcb_by_fl_name(char fl_name[OS_PCB_FL_NAME_LEN]){
+
+  pcbType* pcb_ptr;
+  int pcb_trv = 0;
+  for(; 
+      pcb_trv < NUMPROCESS; 
+      pcb_trv++){
+    
+    pcb_ptr = &pcbs[pcb_trv];
+
+    if(!strcmp(fl_name, pcb_ptr->fl_name))
+      return pcb_ptr;
+  }
+
+
+  return NULL;
+}
+
+// initilize the tcb_walker to the first process in the list
+void OS_tcb_init_walker(tcbType** tcb_walker_ptr, int pcb_id){
+
+  OS_Wait(&tcb_sem);
+
+  tcbType* tcb_ptr;
+
+  for(tcb_curr_traverse_id = 0; 
+      tcb_curr_traverse_id < NUMTHREADS; 
+      tcb_curr_traverse_id++){
+
+    tcb_ptr = &tcbs[tcb_curr_traverse_id];
+
+    if(tcb_ptr->pcb->id == pcb_id){
+      *tcb_walker_ptr = tcb_ptr;
+      goto ret;
+    }
+  }
+
+  *tcb_walker_ptr = NULL;
+  tcb_curr_traverse_id = 0;
+  OS_Signal(&tcb_sem);
+
+ret:
+  return;
+}
+
+
+// go to the next valid tcb and set the passed pointer to it
+void OS_tcb_walk(tcbType** tcb_walker_ptr, int pcb_id){
+
+  //OS_Wait(&tcb_sem);
+
+  tcbType* tcb_ptr;
+
+  for(tcb_curr_traverse_id++; // not incremented when getting out of prev itr
+      tcb_curr_traverse_id < NUMTHREADS; 
+      tcb_curr_traverse_id++){
+
+    tcb_ptr = &tcbs[ tcb_curr_traverse_id ];
+
+    if(tcb_ptr->pcb->id == pcb_id){
+      *tcb_walker_ptr = tcb_ptr;
+      goto ret;
+    }
+  }
+
+  *tcb_walker_ptr = NULL;
+  tcb_curr_traverse_id= 0;
+  OS_Signal(&tcb_sem);
+
+ret:
+  return;
+}
+
+int OS_mark_for_migration(int pcb_id){
+  int i;
+  for(i =0; 
+      i < NUMTHREADS; 
+      i++){
+
+    if(tcbs[i].pcb->id == pcb_id){
+      if(tcbs[i].blocked != NULL)
+        goto unblock;
+
+
+      tcbs[i].is_migrating = 1;
+    }
+  }
+
+  return 0;
+
+unblock:
+  for(; 
+      i >= 0; 
+      i--){
+    if(tcbs[i].pcb->id == pcb_id){
+      tcbs[i].is_migrating = 0;
+    }
+  }
+
+  return 1;
+}
+
+// ******** OS_mark_for_migration ************
+// marks all the threads of a process to migrating state.
+// the scheduler ignores these process while scheduling.
+// Outputs: 0 for success
+/*
+int OS_mark_for_migration(int pcb_id){ 
+  tcbType *pt;
+
+  // loop through the all the tcbs
+  pt = RunPt;
+  do {
+    if(pt->pcb->id == pcb_id){ // thread belogs to the required process
+      pt->is_migrating = 1;
+    }
+
+    pt = pt->next;
+  } while(pt != RunPt);
+
+  return 0;
+}
+
+*/

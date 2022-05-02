@@ -398,3 +398,10 @@ int32_t Heap_Stats(heap_stats_t *stats){
 
   return 0;   // replace
 }
+
+
+int32_t Heap_Mem_Size(void* pointer){
+  int8_t current_tag = *((tag_t*)(pointer) - TAG_SIZE);
+
+  return ((1 << current_tag) << 2) - 2*4;
+}

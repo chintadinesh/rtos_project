@@ -15,7 +15,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-
 // ******** Interpreter ************
 // Command line interpreter (shell)
 // Run the user interface

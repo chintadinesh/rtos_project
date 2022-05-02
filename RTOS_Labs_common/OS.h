@@ -31,6 +31,10 @@
 
 #define STACKSIZE   128      // number of 32-bit words in stack
 
+#define NUMPROCESS  3         // maximum number of processes
+#define NUMTHREADS  15        // maximum number of threads
+
+
 /**
  * \brief Semaphore structure. Feel free to change the type of semaphore, there are lots of good solutions
  */  
@@ -39,6 +43,21 @@ struct  Sema4{
 };
 typedef struct Sema4 Sema4Type;
 
+#define OS_PCB_FL_NAME_LEN 10
+
+/**
+ * \brief Process Control Block structure
+ */   
+struct pcb {
+  uint8_t threads;    // number of active threads
+  void *text;         // pointer to code segment
+  void *data;         // pointer to data segment
+  Sema4Type io_sema;  // acquired when doing IO
+  int8_t id;         // id to identify a process
+  char fl_name[OS_PCB_FL_NAME_LEN];      // file name
+};
+typedef struct pcb pcbType;
+
 /**
  * \brief Thread Control Block structure
  */   
@@ -46,11 +65,13 @@ struct tcb {
   int32_t *sp;            // pointer to stack
   struct tcb *next;       // next element in linked-list
   struct tcb *previous;    // previous element in linked-list
+  pcbType *pcb;           // pointer to parent process
   uint32_t id;
   uint8_t priority;       // 0 highest, 255 lowest
   uint32_t sleep;         // >0 means thread is sleeping
   Sema4Type *blocked;     // blocked on pointer to semaphore, otherwise NULL
   uint32_t blockedTime;   // time when thread was blocked
+  uint8_t is_migrating;   // indicate the thread is migrating
 };
 typedef struct tcb tcbType;
 
@@ -73,7 +94,7 @@ void ContextSwitch(void);
 // Outputs: none
 unsigned long OS_LockScheduler(void);
 
-//******** OS_UnLockScheduler *************** 
+//******** OS_LockScheduler *************** 
 // Resume foreground thread switching.
 // Inputs:  previous
 // Outputs: none
@@ -144,6 +165,17 @@ void OS_bSignal(Sema4Type *semaPt);
 // In Lab 3, you can ignore the stackSize fields
 int OS_AddThread(void(*task)(void), 
    uint32_t stackSize, uint32_t priority);
+
+//******** OS_AddThreadP *************** 
+// add a modified foregound thread (with a parent process) to the scheduler
+// Inputs: pointer to a void/void foreground task
+//         number of bytes allocated for its stack
+//         priority, 0 is highest, 5 is the lowest
+//         pointer to parent process control block
+// Outputs: 1 if successful, 0 if this thread can not be added
+// stack size must be divisable by 8 (aligned to double word boundary)
+int OS_AddThreadP(void(*task)(void), 
+    uint32_t stackSize, uint32_t priority, pcbType *pcb);
 
 //******** OS_AddProcess *************** 
 // add a process with foregound thread to the scheduler
@@ -374,5 +406,21 @@ int OS_RedirectToUART(void);
 //          id      two separate jitters can be calculated
 // Outputs: none
 void OS_JitterSample(int work, uint32_t period, int id);
+
+// initilize the pcb_walker to the first process in the list
+void OS_pcb_init_walker(pcbType** pcb_walker);
+
+// go to the next valid pcb and set the passed pointer to it
+void OS_pcb_walk(pcbType** pcb_walker);
+
+int OS_get_pcb_id(pcbType* pcb);
+
+void OS_tcb_init_walker(tcbType** tcb_walker_ptr, int pcb_id);
+
+void OS_tcb_walk(tcbType** tcb_walker_ptr, int pcb_id);
+
+pcbType* OS_get_pcb_by_fl_name(char fl_name[OS_PCB_FL_NAME_LEN]);
+
+int OS_mark_for_migration(int pcb_id);
 
 #endif

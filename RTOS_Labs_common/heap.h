@@ -83,5 +83,6 @@ int32_t Heap_Free(void* pointer);
  */
 int32_t Heap_Stats(heap_stats_t *stats);
 
+int32_t Heap_Mem_Size(void* pointer);
 
 #endif //#ifndef HEAP_H

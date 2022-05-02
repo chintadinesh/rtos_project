@@ -20,8 +20,9 @@
 #include "../RTOS_Labs_common/eFile.h"
 #include "../RTOS_Labs_common/ADC.h"
 #include "../RTOS_Labs_common/Interpreter.h"
-#include "../RTOS_Labs_common/esp8266.h"
+#include "../RTOS_Lab5_ProcessLoader/loader.h"
 
+#include "../RTOS_Labs_common/heap.h"
 
 // "help" command message definition
 #define HELP_MESSAGE "Available Commands:\r\n \
@@ -31,10 +32,12 @@
     lcd_ bottom\r\n \
     adc_in\r\n \
     time\r\n \
-    led\r\n \
+	led\r\n \
+    file\r\n \
     jitter\r\n \
     performance\r\n \
-    debug\r\n"
+    debug\r\n \
+    elf\r\n"
 
 
 extern uint32_t NumSamples;
@@ -51,7 +54,9 @@ extern uint32_t JitterHistogram2[];
 extern uint32_t const JitterSize1;	
 extern uint32_t const JitterSize2;
 extern uint32_t CPUUtil;
-extern Sema4Type WebServerSema;
+static const ELFSymbol_t symtab[] = {
+	{ "ST7735_Message", ST7735_Message }
+};
 
 // Interpreter message specifications
 uint8_t maxMessageSize = 100;
@@ -91,6 +96,8 @@ int Interpreter_ParseCommand(const char message[]) {
 	char buf[maxMessageSize];
 	char *argv[maxArgSize];
 	size_t argc;
+	char c;
+	ELFEnv_t env = { symtab, 1};
 	
 	// Split message into arguments
 	strcpy(buf, message);
@@ -143,9 +150,121 @@ int Interpreter_ParseCommand(const char message[]) {
 			UART_OutString("Error: Wrong Usage\r\n");
 		}
 	}
+	else if (strcmp(argv[0], "file") == 0) {				// Interact with file system
+		if (strcmp(argv[1], "init") == 0) {			// Initialize file
+			if(!eFile_Init()) {
+				UART_OutString("Initialization Completed!\n\r");
+			}
+			else {
+				UART_OutString("Error\n\r");
+			}
+		}
+		else if (strcmp(argv[1], "format") == 0) {	// Format disk
+			if(!eFile_Format()) {
+				UART_OutString("Formatting Completed!\n\r");
+			}
+			else {
+				UART_OutString("Error\n\r");
+			}
+		}
+		else if (strcmp(argv[1], "mount") == 0) {	// Mount file system
+			if(!eFile_Mount()) {
+				UART_OutString("Mount Completed!\n\r");
+			}
+			else {
+				UART_OutString("Error\n\r");
+			}
+		}
+		else if (strcmp(argv[1], "unmount") == 0) {	// Unmount file system
+			if(!eFile_Unmount()) {
+				UART_OutString("Unmount Completed!\n\r");
+			}
+			else {
+				UART_OutString("Error\n\r");
+			}
+		}
+		if (strcmp(argv[1], "ls") == 0) {			// Print directory contents
+			if(eFile_DOpen("")){
+				UART_OutString("ERROR opening directory\r\n");
+			}
+			else{
+				char* name[7];
+				unsigned long size;
+
+				while(eFile_DirNext(name, &size) == 0){
+					UART_OutString(*name);
+					UART_OutString(" ");
+					UART_OutUDec(size);
+					UART_OutString("\r\n");
+				}
+
+				if(eFile_DClose()){
+					UART_OutString("ERROR closing the directory\r\n");	
+				}
+			}
+		}
+		else if (strcmp(argv[1], "create") == 0) {	// Create file
+			if (argc == 3) {
+				if(!eFile_Create(argv[2])) {
+					UART_OutString("New File Created!\n\r");
+				}
+				else {
+					UART_OutString("Error\n\r");
+				}
+			}
+			else {
+				UART_OutString("Error: Wrong Usage\r\n");
+			}
+		}
+		else if (strcmp(argv[1], "write") == 0) {	// Write to file
+			if (argc == 4) {
+				if(!eFile_WOpen(argv[2])) {
+					for (int i = 0; i < strlen(argv[3]); i++) {
+						if(eFile_Write(argv[3][i])) {
+							UART_OutString("Error\n\r");
+							break;
+						}
+					}
+					if(eFile_WClose())              UART_OutString("Error\n\r");
+					UART_OutString("Write Completed!\n\r");
+				}
+			}
+			else {
+				UART_OutString("Error: Wrong Usage\r\n");
+			}
+		}
+		else if (strcmp(argv[1], "read") == 0) {	// Read file
+			if (argc == 3) {
+				if(!eFile_ROpen(argv[2])) {
+					while (!eFile_ReadNext(&c)) {
+						UART_OutChar(c);
+					}
+					UART_OutString("\n\r");
+					if(eFile_RClose())              UART_OutString("Error\n\r");
+					UART_OutString("Read Completed!\n\r");
+				}
+			}
+			else {
+				UART_OutString("Error: Wrong Usage\r\n");
+			}
+		}
+		else if (strcmp(argv[1], "delete") == 0) {	// Delete file
+			if (argc == 3) {
+				if(!eFile_Delete(argv[2])) {
+					UART_OutString("File Deleted!\n\r");
+				}
+				else {
+					UART_OutString("Error\n\r");
+				}
+			}
+			else {
+				UART_OutString("Error: Wrong Usage\r\n");
+			}
+		}
+	}
 	else if (strcmp(argv[0], "jitter") == 0) {				// Print jitter information
 		UART_OutString("---------- Jitter1 -------------\r\n");	
-		Jitter(MaxJitter1, JitterSize1, JitterHistogram1);	
+    	Jitter(MaxJitter1, JitterSize1, JitterHistogram1);	
 		UART_OutString("---------- Jitter2 -------------\r\n");	
 		Jitter(MaxJitter2, JitterSize2, JitterHistogram2);
 	}
@@ -187,10 +306,132 @@ int Interpreter_ParseCommand(const char message[]) {
 		}
 		UART_OutString("\r\n");
 	}
-	else {													// Unrecognized commands, print help message
-		UART_OutString("Error: Unrecognized Command\r\n");
-		// UART_OutString(HELP_MESSAGE);
+	else if (strcmp(argv[0], "elf") == 0) {					// Run program from SD Card
+		if (argc == 2) {
+			if (!exec_elf(argv[1], &env)) {
+				UART_OutString("Error\r\n");
+			}
+		}
+		else {
+			UART_OutString("Error: Wrong Usage\r\n");
+		}
 	}
+	else if (strcmp(argv[0], "top") == 0) {					
+
+
+		if (strcmp(argv[1], "pcbs") == 0) {			// Initialize file
+
+      // this functions by walking through the list of processes.
+      // Initilize a process data structure and pass the pointer to the
+      // function.
+      // It returns NULL when the process list ends
+      pcbType* pcb_walker;
+
+      int n = 0;
+      char buffer[50];
+
+      // Format
+      // NO FILE    ID  THREADS IO_SEM 
+      // 1. hello.c 32  3       0
+      sprintf(buffer, "%s. %s %s %s %s %s %s\n\r", "NO", 
+                    "FILE", 
+                    "ID",
+                    "THREADS",          
+                    "IO_SEM",
+                    "TXT_LEN",
+                    "DT_LEN");
+
+      UART_OutString(buffer);
+
+
+      for( OS_pcb_init_walker(&pcb_walker);
+          (pcb_walker) != NULL;
+          OS_pcb_walk(&pcb_walker)){
+
+
+        sprintf(buffer, "%d. %s\t %d\t\t %d\t %d\t %d\t %d\n\r", 
+                      ++n, 
+                      pcb_walker->fl_name,
+                      pcb_walker->id,
+                      pcb_walker->threads, 
+                      pcb_walker->io_sema.value,
+                      Heap_Mem_Size(pcb_walker->text),
+                      Heap_Mem_Size(pcb_walker->data)
+                      );
+
+        UART_OutString(buffer);
+      }
+    }
+		else if (strcmp(argv[1], "tcbs") == 0) {//print only the pcb corresponding to the id
+
+      char buffer[50];
+      tcbType* tcb_walker;
+
+      int n = 0;
+
+      // Format
+      // NO PID  TID PRI MGTG
+      // 1. 0    1    2   0
+      // 2. 0    1    2   0
+      sprintf(buffer, "%s. %s\t %s\t %s\t %s\n\r", 
+                    "NO", 
+                    "PID",
+                    "TID",
+                    "PRI",
+                    "MGTG"
+                    );
+
+      UART_OutString(buffer);
+
+      pcbType* pcb = OS_get_pcb_by_fl_name("root");
+      if(pcb == NULL){
+        return 0;
+      }
+
+
+      int pcb_id = pcb->id;
+      for( OS_tcb_init_walker(&tcb_walker, pcb_id);
+          (tcb_walker) != NULL;
+          OS_tcb_walk(&tcb_walker, pcb_id)){
+
+
+        sprintf(buffer, "%d. %d\t\t %d\t\t %d\t %d\n\r", 
+                      ++n, 
+                      tcb_walker->pcb->id,
+                      tcb_walker->id,
+                      tcb_walker->priority, 
+                      tcb_walker->is_migrating);
+
+        UART_OutString(buffer);
+      }
+
+    }
+    else {													// Unrecognized commands, print help message
+      UART_OutString("Error: Unrecognized SubCommand\r\n");
+      UART_OutString(HELP_MESSAGE);
+    }
+  }
+	else if (strcmp(argv[0], "mgrt") == 0) {					
+    if(argc == 2){
+      int pcb_id = (int)(argv[1][0] - '0');
+      if (pcb_id >= NUMPROCESS){
+        UART_OutString("Error: Invalid pid\r\n");
+        UART_OutString(HELP_MESSAGE);
+      }
+      else{
+        OS_mark_for_migration(pcb_id);
+      }
+    }
+    else{
+      UART_OutString("Error: Invalid usage of mgrt\r\n");
+      UART_OutString(HELP_MESSAGE);
+    }
+  }
+  else {													// Unrecognized commands, print help message
+    UART_OutString("Error: Unrecognized Command\r\n");
+    UART_OutString(HELP_MESSAGE);
+  }
+
 
   return 0;
 }
@@ -267,160 +508,4 @@ void Jitter(int32_t MaxJitter, uint32_t const JitterSize, uint32_t JitterHistogr
     UART_OutString(" ");
   }
   UART_OutString("\r\n");
-}
-
-// ******** WebInterpreter ************
-// Command line interpreter (shell) through WiFi
-// Run the user interface
-// Inputs:  none
-// Outputs: none
-void WebInterpreter(void) { 
-  int status = 0;
-  char inputString[maxMessageSize];
-  int i = 0;
-
-  ST7735_DrawString(0,3,"Connected      ",ST7735_YELLOW);
-
-  // run interpreter
-	ESP8266_Send("\r\nStarting Interpreter...\r\n");
-  do {
-		strcpy(inputString, "");	// Clear input string
-    	ESP8266_Send("Interpreter>");
-   		ESP8266_Receive(inputString, maxMessageSize);	// Requires [Ctrl + Enter] to send
-	    // ESP8266_Send("\r\n");
-		status = WebInterpreter_ParseCommand(inputString);
-		ESP8266_Send("\r\n");
-  } while(!status);    // exit based on status code
-	
-	ESP8266_Send("Exiting Interpreter...\r\n");
-	for (i = 0; i < 80000000 / 1000; i++);		// small delay to finish printing
-
-	ST7735_DrawString(0,3,"Diconnected      ",ST7735_RED);
-	ESP8266_CloseTCPConnection();
-	OS_Signal(&WebServerSema);
-
-    OS_Kill();
-}
-
-// ******** WebInterpreter_ParseCommand ************
-// Parse and interpret a command through WiFi
-// Inputs: command to interpret
-// Outputs: status to continue/exit interpreter
-int WebInterpreter_ParseCommand(const char message[]) {
-	char buf[maxMessageSize];
-	char *argv[maxArgSize];
-	size_t argc;
-	char uint32_t_str[10];
-	
-	// Split message into arguments
-	strcpy(buf, message);
-	argc = Split_Message(buf, argv, maxArgSize);
-
-	// Interpret command and perform respective function
-	if 		(strcmp(argv[0], "exit") == 0) {				// Exit interpreter
-		return 1;
-	}
-	else if (strcmp(argv[0], "help") == 0) {				// Print help message
-		ESP8266_Send(HELP_MESSAGE);
-	}
-	else if (strcmp(argv[0], "lcd_top") == 0) {				// Print to the top-half of ST7735 display
-		if (argc == 3 || argc == 4) {
-			ST7735_Message(0, atoi(argv[1]), argv[2], atoi(argv[3]));
-		}
-		else {
-			ESP8266_Send("Error: Wrong Usage\r\n");
-		}
-	}
-	else if (strcmp(argv[0], "lcd_bottom") == 0) {			// Print to the bottom-half of ST7735 display
-		if (argc == 3 || argc == 4) {
-			ST7735_Message(1, atoi(argv[1]), argv[2], atoi(argv[3]));
-		}
-		else {
-			ESP8266_Send("Error: Wrong Usage\r\n");
-		}
-	}
-	else if (strcmp(argv[0], "adc_in") == 0) {				// Read in value from ADC module
-		ESP8266_Send("ADC: ");
-		sprintf(uint32_t_str, "%u", ADC_In());
-		ESP8266_Send(uint32_t_str);
-		ESP8266_Send("\r\n");
-	}
-	else if (strcmp(argv[0], "time") == 0) {				// Print system runtime
-		ESP8266_Send("System Runtime: ");
-		sprintf(uint32_t_str, "%u", OS_MsTime());
-		ESP8266_Send(uint32_t_str);
-		ESP8266_Send("ms\r\n");
-	}
-	else if (strcmp(argv[0], "led") == 0) {					// Toggle red, green, or blue led
-		if (strcmp(argv[1], "red") == 0) {
-			LED_RedToggle();
-		}
-		else if (strcmp(argv[1], "green") == 0) {
-			LED_GreenToggle();
-		}
-		else if (strcmp(argv[1], "blue") == 0) {
-			LED_BlueToggle();
-		}
-		else {
-			ESP8266_Send("Error: Wrong Usage\r\n");
-		}
-	}
-	else if (strcmp(argv[0], "jitter") == 0) {				// Print jitter information
-		ESP8266_Send("---------- Jitter1 -------------\r\n");	
-		Jitter(MaxJitter1, JitterSize1, JitterHistogram1);	
-		ESP8266_Send("---------- Jitter2 -------------\r\n");	
-		Jitter(MaxJitter2, JitterSize2, JitterHistogram2);
-	}
-	else if (strcmp(argv[0], "performance") == 0) {			// Print performance measures
-		ESP8266_Send("Performance Measures\r\n");
-		ESP8266_Send("--------------------\r\n");
-		ESP8266_Send("NumSamples: ");
-		sprintf(uint32_t_str, "%u", NumSamples);
-		ESP8266_Send(uint32_t_str);
-		ESP8266_Send("\r\n");
-		ESP8266_Send("NumCreated: ");
-		sprintf(uint32_t_str, "%u", NumCreated);
-		ESP8266_Send(uint32_t_str);
-		ESP8266_Send("\r\n");
-		ESP8266_Send("DataLost: ");
-		sprintf(uint32_t_str, "%u", DataLost);
-		ESP8266_Send(uint32_t_str);
-		ESP8266_Send("\r\n");
-		ESP8266_Send("FilterWork: ");
-		sprintf(uint32_t_str, "%u", FilterWork);
-		ESP8266_Send(uint32_t_str);
-		ESP8266_Send("\r\n");
-		ESP8266_Send("PIDWork: ");
-		sprintf(uint32_t_str, "%u", PIDWork);
-		ESP8266_Send(uint32_t_str);
-		ESP8266_Send("\r\n");
-		ESP8266_Send("CPUUtil: ");
-		sprintf(uint32_t_str, "%u", CPUUtil);
-		ESP8266_Send(uint32_t_str);
-		ESP8266_Send("\r\n");
-	}
-	else if (strcmp(argv[0], "debug") == 0) {				// Print debugging parameters
-		ESP8266_Send("Debugging Parameters\r\n");
-		ESP8266_Send("--------------------\r\n");
-		ESP8266_Send("x: ");
-		for (int i = 0; i < (sizeof x / sizeof x[0]); i++) {
-			sprintf(uint32_t_str, "%u", x[i]);
-			ESP8266_Send(uint32_t_str);
-			ESP8266_Send(" ");
-		}
-		ESP8266_Send("\r\n");
-		ESP8266_Send("y: ");
-		for (int i = 0; i < (sizeof y / sizeof y[0]); i++) {
-			sprintf(uint32_t_str, "%u", y[i]);
-			ESP8266_Send(uint32_t_str);
-			ESP8266_Send(" ");
-		}
-		ESP8266_Send("\r\n");
-	}
-	else {													// Unrecognized commands, print help message
-		ESP8266_Send("Error: Unrecognized Command\r\n");
-		// ESP8266_Send(HELP_MESSAGE);
-	}
-
-  return 0;
 }
