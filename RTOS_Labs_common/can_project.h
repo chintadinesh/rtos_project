@@ -67,7 +67,7 @@ integer size of the message that is being sent.
 
 #define CAN_FRAME_SIZE 8
 //#define CAN_FRAME_SIZE 16   // not working
-#define CAN_MAXFIFOSIZE 1024      // maximum size of FIFO buffer
+#define CAN_MAXFIFOSIZE 64     // maximum size of FIFO buffer
 
 // **************** CAN Frame structure ****************
 typedef struct can_msg {
@@ -112,10 +112,17 @@ void CAN0_SendData(uint8_t data[CAN_FRAME_SIZE]);
 // Assumption: data pointer has the size number of bytes allocated.
 //void CAN0_ReceiveMessage(uint32_t size, uint8_t* data); 
 //uint8_t* CAN0_ReceiveMessage(void);
-uint8_t* CAN0_ReceiveMessage(uint32_t size);
+// unqueue size number of bytes from the FIFO queue and
+// put in the ptr pointer.
+void CAN0_ReceiveMessage(uint32_t size, uint8_t* ptr);
 
+// convert the next 4 bytes in the FIFO into uint32_t type and
+// get rid of extra 4 bytes from the first frame
 uint32_t CAN0_ReceiveSize(void);
 
 void CAN0_SendMessage(uint32_t size, uint8_t* data);
+
+// timer proc for sendind the data
+void can_timerproc(void);
 
 #endif //  __CAN0_H__

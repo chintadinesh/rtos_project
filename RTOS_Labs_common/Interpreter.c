@@ -54,9 +54,17 @@ extern uint32_t JitterHistogram2[];
 extern uint32_t const JitterSize1;	
 extern uint32_t const JitterSize2;
 extern uint32_t CPUUtil;
+
+const ELFSymbol_t symtab[] = {
+	{ "ST7735_Message", ST7735_Message }
+};
+
+/*
 static const ELFSymbol_t symtab[] = {
 	{ "ST7735_Message", ST7735_Message }
 };
+
+*/
 
 // Interpreter message specifications
 uint8_t maxMessageSize = 100;

@@ -17,22 +17,25 @@
 #ifndef __OS_H
 #define __OS_H  1
 #include <stdint.h>
+#include "../RTOS_Labs_common/can_project.h"
 
 /**
  * \brief Times assuming a 80 MHz
  */      
 #define TIME_1MS    80000          
+#define TIME_1US    80
 #define TIME_2MS    (2*TIME_1MS)  
 #define TIME_500US  (TIME_1MS/2)  
 #define TIME_250US  (TIME_1MS/5)  
+#define TIME_10US  (TIME_1MS/625)  
 
 #define PERIOD1 TIME_500US   // DAS 2kHz sampling period in system time units
 #define PERIOD2 TIME_1MS     // PID period in system time units
 
-#define STACKSIZE   128      // number of 32-bit words in stack
+#define STACKSIZE   256      // number of 32-bit words in stack
 
 #define NUMPROCESS  3         // maximum number of processes
-#define NUMTHREADS  15        // maximum number of threads
+#define NUMTHREADS  10        // maximum number of threads
 
 
 /**
@@ -318,7 +321,8 @@ void OS_MailBox_Init(void);
 // Outputs: none
 // This function will be called from a foreground thread
 // It will spin/block if the MailBox contains data not yet received 
-void OS_MailBox_Send(uint32_t data);
+//void OS_MailBox_Send(uint32_t data);
+void OS_MailBox_Send(uint8_t data[CAN_FRAME_SIZE]);
 
 // ******** OS_MailBox_Recv ************
 // remove mail from the MailBox
@@ -326,7 +330,9 @@ void OS_MailBox_Send(uint32_t data);
 // Outputs: data received
 // This function will be called from a foreground thread
 // It will spin/block if the MailBox is empty 
-uint32_t OS_MailBox_Recv(void);
+//uint32_t OS_MailBox_Recv(void);
+void OS_MailBox_Recv(uint8_t* data);
+//void OS_MailBox_Recv(uint8_t * data [CAN_FRAME_SIZE]);
 
 // ******** OS_Time ************
 // return the system time 
@@ -422,5 +428,11 @@ void OS_tcb_walk(tcbType** tcb_walker_ptr, int pcb_id);
 pcbType* OS_get_pcb_by_fl_name(char fl_name[OS_PCB_FL_NAME_LEN]);
 
 int OS_mark_for_migration(int pcb_id);
+
+pcbType* GetFreeProcess(void);
+
+tcbType* GetFreeThread(void);
+
+void OS_add_migrated_thread(tcbType* newThreadPt);
 
 #endif

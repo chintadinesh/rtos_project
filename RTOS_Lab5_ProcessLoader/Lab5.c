@@ -42,6 +42,7 @@
 #include "../RTOS_Labs_common/eFile.h"
 
 #include <string.h>
+#include "../RTOS_Lab5_ProcessLoader/loader.h"
 
 // can bus for the communication
 #include "../RTOS_Labs_common/can_project.h"
@@ -795,15 +796,26 @@ void waitforsw2touch(void){
   while((GPIO_PORTF_DATA_R&0x01) == 0x00){};
 }
 
-#define TEXT_SIZE 128
-#define DATA_SIZE 1024
+#define TEXT_SIZE 1016
+#define DATA_SIZE 120
 
 extern int32_t Stacks[NUMTHREADS][STACKSIZE];  // threads with id = n will have stack at position n
+Sema4Type mgrt_pr_lncd_sema; 
+
+void launch_migrating_process(void);
 
 void send_data(void) {
   tcbType* tcb_walker_ptr;
 
+  
+  // to synchronize and launch the migrating process
+  OS_InitSemaphore(&mgrt_pr_lncd_sema, 0);
+  NumCreated += OS_AddThread(&launch_migrating_process,128,0); 
+  OS_Wait(&mgrt_pr_lncd_sema);
+
   waitforsw2touch();
+
+  PF1 ^= 0x02;
 
   pcbType* pcb_ptr = OS_get_pcb_by_fl_name("root");
 
@@ -812,23 +824,45 @@ void send_data(void) {
   CAN0_SendMessage(sizeof(*pcb_ptr), (uint8_t *)pcb_ptr);
 
   OS_tcb_init_walker(&tcb_walker_ptr, pcb_ptr->id);
+  //OS_Sleep(1);
+
+  // replace text with some known sequence
+  /*
+  for(int i = 0; i < TEXT_SIZE; i++){
+    void* txt = tcb_walker_ptr->pcb->text;
+    *((uint8_t *)txt + i) = i;
+  }
+  */
   
   if(tcb_walker_ptr != NULL){
-    CAN0_SendMessage(TEXT_SIZE, (uint8_t *)tcb_walker_ptr->pcb->text);
-    CAN0_SendMessage(TEXT_SIZE, (uint8_t *)tcb_walker_ptr->pcb->data);
+    CAN0_SendMessage(TEXT_SIZE, (uint8_t *)(tcb_walker_ptr->pcb->text));
+    //OS_Sleep(1);
+    CAN0_SendMessage(DATA_SIZE, (uint8_t *)(tcb_walker_ptr->pcb->data));
+    //OS_Sleep(1);
   }
 
   while(tcb_walker_ptr !=  NULL){
+    uint32_t rel_sp = (uint32_t )(tcb_walker_ptr->sp - Stacks[tcb_walker_ptr->id]);
+    //send the relative stack position
+    CAN0_SendMessage(sizeof(rel_sp), (uint8_t *)(&rel_sp));
+    //OS_Sleep(1);
+
+
     CAN0_SendMessage(sizeof(*tcb_walker_ptr), (uint8_t *)tcb_walker_ptr);
+    //OS_Sleep(1);
 
     // send the stack
     CAN0_SendMessage(sizeof(Stacks[tcb_walker_ptr->id]),
-                      (uint8_t *)Stacks[tcb_walker_ptr->id]);
+                      (uint8_t *)(Stacks[tcb_walker_ptr->id]));
+
+    //OS_Sleep(1);
 
     OS_tcb_walk(&tcb_walker_ptr, pcb_ptr->id);
   }
   
+  PF1 ^= 0x02;
   //CAN0_SendData(sending_data);
+  //TODO: Kill the migrated threads.
 
   Clock_Delay(13333333);        // wait 2.5 sec
 
@@ -836,22 +870,98 @@ void send_data(void) {
   OS_Kill();
 }
 
+int32_t stack[STACKSIZE];
+
+extern tcbType* RunPt;
+
 void receive_data(void) {
 
+  tcbType tcb;
+
+  //PF1 ^= 0x02;
+  // allocate a pcb
   pcbType* pcb_ptr = GetFreeProcess();
+  //TODO: fill pcb with meaningful data
+
+  // get the pcb
   uint32_t size = CAN0_ReceiveSize(); 
 
-  //uint8_t* data = Heap_Malloc(256);
+  CAN0_ReceiveMessage(size, (uint8_t*) pcb_ptr);
+  // modify the pcb id if required
 
-  //CAN0_ReceiveMessage(size, data);
-  uint32_t size = TEXT_SIZE;
-  uint8_t* data = CAN0_ReceiveMessage(size);
+  //get the text
+  size = CAN0_ReceiveSize(); 
+  uint8_t* text = (uint8_t *)Heap_Malloc(size); // 8 bytes for meta data
+  memset((void*)text, 0, size);
 
-  UART_OutString("Received data\n\r");
+  CAN0_ReceiveMessage(size, text);
 
-  for(int i = 0; i < size; i++) {
-    UART_OutChar(*(data + i));
+  pcb_ptr->text = text;
+
+  // get the data
+  size = CAN0_ReceiveSize(); 
+  void* data = (void *)Heap_Malloc(size); // 8 bytes for the meta data
+  memset((void*)data, 0, size);
+
+  CAN0_ReceiveMessage(size, (uint8_t*)data);
+
+  pcb_ptr->data = data;
+
+  uint32_t rel_sp;
+
+
+  // we don't need to block the threads since they are not added to the run
+  // queue.
+  for(int i = 0; i < pcb_ptr->threads; i++) {
+
+    // get the relative stack position
+    size = CAN0_ReceiveSize(); 
+    CAN0_ReceiveMessage(size, (uint8_t*) (&rel_sp));
+
+    // get the tcb
+    size = CAN0_ReceiveSize(); 
+
+    CAN0_ReceiveMessage(size, (uint8_t*)(&tcb));
+
+    // copy the relevant information to the tcb_ptr
+    tcbType* tcb_ptr = GetFreeThread();
+    tcb_ptr->pcb = pcb_ptr;
+    tcb_ptr->priority = tcb.priority; 
+    tcb_ptr->sleep = tcb.sleep; // this may not be accurate
+    tcb_ptr->blockedTime = tcb.blockedTime;
+    tcb_ptr->sp = Stacks[tcb_ptr->id] + rel_sp;
+
+    *(Stacks[tcb_ptr->id] + rel_sp - 2) = (int32_t)(&RunPt); //Set the RunPt
+
+    tcb_ptr->is_migrating = tcb.is_migrating; // we don't want the thread to run yet
+
+    // get the stack
+    size = CAN0_ReceiveSize(); 
+    CAN0_ReceiveMessage(size, (uint8_t*)(Stacks[tcb_ptr->id]));
+
+    OS_add_migrated_thread(tcb_ptr);
+
+    //Set R9 to point to correct data
+    Stacks[tcb_ptr->id][STACKSIZE - 11] = (int32_t)(pcb_ptr->data);  // R9
+
+    // for debugging
+    int p = 0;
   }
+
+  int32_t status = StartCritical();
+
+  tcbType* tcb_ptr = &tcb;
+
+  //clear the is_migrating flag 
+  OS_tcb_init_walker(&tcb_ptr, pcb_ptr->id);
+  while(tcb_ptr != NULL){
+    tcb_ptr->is_migrating = 0;
+
+    OS_tcb_walk(&tcb_ptr, pcb_ptr->id);
+  }
+
+
+  EndCritical(status);
 
   OS_Kill();
 }
@@ -869,12 +979,35 @@ void SW1Push(void) {
   return;
 }
 
+extern const ELFSymbol_t symtab[];
+void launch_migrating_process(void){
+
+	ELFEnv_t env = { symtab, 1};
+
+  if(!eFile_Mount()) {
+    //UART_OutString("Mount Completed!\n\r");
+  }
+  else {
+    //UART_OutString("Error\n\r");
+  }
+
+  if (!exec_elf("USER.AXF", &env)) {
+    //UART_OutString("Error launching process\r\n");
+  }
+
+  OS_Signal(&mgrt_pr_lncd_sema);
+
+  OS_Kill();
+} 
 
 int realmain_can_receive(void) {
   LaunchPad_Init();
   OS_Init();        // initialize, disable interrupts
   PortD_Init();     // debugging profile
   MaxJitter1 = 0;    // in 1us units
+
+  // for sending the data
+  OS_MailBox_Init();
 
 	// Initialize CAN FIFO
 	CAN_Fifo_Init(CAN_MAXFIFOSIZE); 
@@ -890,12 +1023,13 @@ int realmain_can_receive(void) {
   
   // attach background tasks
   OS_AddPeriodicThread(&disk_timerproc,TIME_1MS,0);   // time out routines for disk  
+  OS_AddPeriodicThread(&can_timerproc,126 * TIME_1US,0);   // time out routines for can
   OS_AddSW1Task(&SW1Push,2);
   //OS_AddSW2Task(&SW2Push,2);  
 
   // create initial foreground threads
   NumCreated = 0;
-  NumCreated += OS_AddThread(&Interpreter,128,2); 
+  //NumCreated += OS_AddThread(&Interpreter,128,3); 
   NumCreated += OS_AddThread(&receive_data,128,2); 
   NumCreated += OS_AddThread(&Idle,128,5);  // at lowest priority 
  
@@ -924,6 +1058,7 @@ int realmain_can_send(void) {
   
   // attach background tasks
   OS_AddPeriodicThread(&disk_timerproc,TIME_1MS,0);   // time out routines for disk  
+  OS_AddPeriodicThread(&can_timerproc,10 * TIME_1US,0);   // time out routines for can
   //OS_AddSW1Task(&SW1Push,2);
   //OS_AddSW2Task(&SW2Push,2);  
 

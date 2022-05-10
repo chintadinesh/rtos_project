@@ -28,6 +28,8 @@
 #include "../RTOS_Labs_common/UART0int.h"
 #include "../RTOS_Labs_common/eFile.h"
 #include "../RTOS_Labs_common/heap.h"
+#include "../RTOS_Labs_common/can_project.h"
+
 
 #include <string.h>
 
@@ -54,9 +56,11 @@ uint32_t volatile *FIFOPutPt;
 uint32_t volatile *FIFOGetPt;
 uint32_t FIFO[MAXFIFOSIZE];
 Sema4Type FIFOCurrentSize;              // 0 if empty, FIFOSize if full
-uint32_t MailboxData;
+//uint32_t MailboxData;
+uint8_t MailboxData[CAN_FRAME_SIZE];
 Sema4Type MailboxFree;                  // 1 if free, 0 if not
-Sema4Type MailboxDataValid;             // 1 if data available, 0 if no data
+//Sema4Type MailboxDataValid;             // 1 if data available, 0 if no data
+uint8_t MailboxDataValid = 0;
 
 
 // Performance Measurements
@@ -295,10 +299,16 @@ void OS_Signal(Sema4Type *semaPt){
     pt = RunPt;
     bestPt = NULL;
     do {
-      if(pt->is_migrating) // don't consider migrating threads
+      if(pt->is_migrating){ // don't consider migrating threads
+        pt = pt->next;    // move at least one
         continue;
+      }
 
-      if (pt->blocked == semaPt && (pt->priority < bestPriority || (pt->priority == bestPriority && pt->blockedTime < bestTime))) {
+      if (pt->blocked == semaPt 
+          && (pt->priority < bestPriority 
+                || (pt->priority == bestPriority 
+                      && pt->blockedTime < bestTime))) {
+
         bestPriority = pt->priority;
         bestTime = pt->blockedTime;
         bestPt = pt;
@@ -403,7 +413,7 @@ tcbType* GetFreeThread(void){
 // Outputs: none
 void SetInitialStack(int i) {
   tcbs[i].sp = &Stacks[i][STACKSIZE - 16];  // thread stack pointer
-  Stacks[i][STACKSIZE-1] = 0x01000000; // Thumb bit (PC)
+  Stacks[i][STACKSIZE-1] = 0x01000000; // Thumb bit
   Stacks[i][STACKSIZE-3] = 0x14141414; // R14 (LR)
   Stacks[i][STACKSIZE-4] = 0x12121212; // R12
   Stacks[i][STACKSIZE-5] = 0x03030303; // R3
@@ -535,12 +545,15 @@ int OS_AddThreadP(void(*task)(void),
 // Outputs: pointer to free tcb
 pcbType* GetFreeProcess(void){
   // Loop through pool
+  int32_t status = StartCritical();
   for (int i = 0; i < NUMPROCESS; i++) {
     if (pcbs[i].threads == 0) {
+      EndCritical(status);
       return &pcbs[i];      // free process
     }
   }
 
+  EndCritical(status);
   return NULL;    // no free process available
 }
 
@@ -927,7 +940,7 @@ int32_t OS_Fifo_Size(void){
 // Outputs: none
 void OS_MailBox_Init(void){
   OS_InitSemaphore(&MailboxFree, 1);
-  OS_InitSemaphore(&MailboxDataValid, 0);
+  //OS_InitSemaphore(&MailboxDataValid, 0);
 };
 
 // ******** OS_MailBox_Send ************
@@ -936,10 +949,17 @@ void OS_MailBox_Init(void){
 // Outputs: none
 // This function will be called from a foreground thread
 // It will spin/block if the MailBox contains data not yet received 
-void OS_MailBox_Send(uint32_t data){
+//void OS_MailBox_Send(uint32_t data){
+void OS_MailBox_Send(uint8_t data[CAN_FRAME_SIZE]){
   OS_bWait(&MailboxFree);         // wait for mailbox to be free
-  MailboxData = data;
-  OS_bSignal(&MailboxDataValid);  // signal data in mailbox
+
+  int32_t status = StartCritical();
+  for(int i = 0; i < CAN_FRAME_SIZE; i++){
+    MailboxData[i] = data[i];
+  }
+  MailboxDataValid = 1;
+  EndCritical(status);
+  //OS_bSignal(&MailboxDataValid);  // signal data in mailbox
 };
 
 // ******** OS_MailBox_Recv ************
@@ -948,13 +968,21 @@ void OS_MailBox_Send(uint32_t data){
 // Outputs: data received
 // This function will be called from a foreground thread
 // It will spin/block if the MailBox is empty 
-uint32_t OS_MailBox_Recv(void){
-  uint32_t data;
-  OS_bWait(&MailboxDataValid);    // wait for data in mailbox
-  data = MailboxData;
-  OS_bSignal(&MailboxFree);       // signal mailbox is free
+//void OS_MailBox_Recv(uint8_t * data [CAN_FRAME_SIZE]){
+void OS_MailBox_Recv(uint8_t* data){
+  //uint32_t data;
+  //OS_bWait(&MailboxDataValid);    // wait for data in mailbox
+  // we dont wait in a timer routine
+  if(MailboxDataValid == 1){
+    for(int i = 0; i < CAN_FRAME_SIZE; i++){
+      //data = MailboxData;
+      *(data + i) =  MailboxData[i];
+    }
+    OS_bSignal(&MailboxFree);       // signal mailbox is free
+    MailboxDataValid = 0;
+  }
 
-  return data;
+  //return data;
 };
 
 // ******** OS_Time ************
@@ -1270,8 +1298,6 @@ ret:
 // go to the next valid tcb and set the passed pointer to it
 void OS_tcb_walk(tcbType** tcb_walker_ptr, int pcb_id){
 
-  //OS_Wait(&tcb_sem);
-
   tcbType* tcb_ptr;
 
   for(tcb_curr_traverse_id++; // not incremented when getting out of prev itr
@@ -1296,6 +1322,8 @@ ret:
 
 int OS_mark_for_migration(int pcb_id){
   int i;
+
+  int32_t status = StartCritical();
   for(i =0; 
       i < NUMTHREADS; 
       i++){
@@ -1309,6 +1337,7 @@ int OS_mark_for_migration(int pcb_id){
     }
   }
 
+  EndCritical(status);
   return 0;
 
 unblock:
@@ -1320,6 +1349,7 @@ unblock:
     }
   }
 
+  EndCritical(status);
   return 1;
 }
 
@@ -1345,3 +1375,29 @@ int OS_mark_for_migration(int pcb_id){
 }
 
 */
+
+
+void OS_add_migrated_thread(tcbType* newThreadPt){
+  // code copied from OS_Add_Thread
+
+  // don't let this stop in the middle
+  int32_t status = StartCritical();
+
+  if (RunPt == 0) {   // first and only thread
+    newThreadPt->next = newThreadPt;
+    newThreadPt->previous = newThreadPt;
+    RunPt = newThreadPt;
+  }
+  else {
+    // Update next pointers
+    newThreadPt->next = RunPt->next;
+    RunPt->next = newThreadPt;
+
+    // Update previous pointers
+    newThreadPt->previous = RunPt;
+    newThreadPt->next->previous = newThreadPt;
+  }
+  EndCritical(status);
+
+  return;
+}

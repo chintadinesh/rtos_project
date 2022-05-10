@@ -18,16 +18,17 @@
 void thread(void)
 {
   unsigned int id;
+  PF3 ^= 0x08;
 	
   while(1) {
-    id = OS_Id();
-    PF3 ^= 0x08;
+    //id = OS_Id();
     //line = ((line + 1) % 4) + 1;
     //Display_Message(0,line, "Thread: ", id);
     OS_Sleep(2000);
+    PF3 ^= 0x08;
     //line = ((line + 1) % 4) + 1;
     //Display_Message(0,line, "Thread dying: ", id);
-    PF3 ^= 0x08;
+    //PF3 ^= 0x08;
   }
 
   OS_Kill();
@@ -38,7 +39,7 @@ int main(void)
   unsigned int id;
   unsigned long time;
 	
-  id = OS_Id();
+  //id = OS_Id();
   PF2 ^= 0x04;
   //Display_Message(0,0, "Hello world: ", id);
   OS_AddThread(thread, 128, 2);
@@ -48,8 +49,8 @@ int main(void)
   //Display_Message(0,5, "Sleep time: ", time);
 
   while (1) {
+    OS_Sleep(4000);
     PF2 ^= 0x04;
-    OS_Sleep(1000);
   }
   OS_Kill();
 }

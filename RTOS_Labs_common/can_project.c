@@ -51,6 +51,7 @@
 #include "../RTOS_Labs_common/OS.h"
 
 #include <string.h>
+#include "../inc/CortexM.h"
 
 
 // reverse these IDs on the other microcontroller
@@ -279,15 +280,20 @@ void CAN0_SendMessage(uint32_t size, uint8_t* data){
   can_send_message[2] = (uint8_t)((size << 16) >> 24);
   can_send_message[3] = (uint8_t)((size << 24) >> 24);
 
-  CAN0_Setup_Message_Object(CAN_XMT_ID, NULL, CAN_FRAME_SIZE, can_send_message, CAN_XMT_ID, MSG_OBJ_TYPE_TX);
-  for(int i = 0; i < 6400; i++); // delay
+  //CAN0_Setup_Message_Object(CAN_XMT_ID, NULL, CAN_FRAME_SIZE, can_send_message, CAN_XMT_ID, MSG_OBJ_TYPE_TX);
+  //for(int i = 0; i < 6400; i++); // delay
+  OS_MailBox_Send(can_send_message);
+
 
   while(size > 0){
     uint8_t msg_size = (size > CAN_FRAME_SIZE) ? CAN_FRAME_SIZE : size; // current bytes to be sent
     memset((void*) can_send_message, 0, CAN_FRAME_SIZE);
     memcpy(can_send_message, data, msg_size); // copy those bytes
-    CAN0_Setup_Message_Object(CAN_XMT_ID, NULL, CAN_FRAME_SIZE, 
-                can_send_message, CAN_XMT_ID, MSG_OBJ_TYPE_TX); // send
+
+    //CAN0_Setup_Message_Object(CAN_XMT_ID, NULL, CAN_FRAME_SIZE, 
+    //            can_send_message, CAN_XMT_ID, MSG_OBJ_TYPE_TX); // send
+    OS_MailBox_Send(can_send_message);
+
     size -= msg_size; // update
     data += msg_size; // update the data pointer
     for(int i = 0; i < 6400; i++); // delay
@@ -347,17 +353,25 @@ uint32_t CAN0_ReceiveSize(void){
 // FIFO. There is no byte level FIFO anymore. The msgLength is not reliable.
 // Hence, we need to communicate in terms of packets.
 // Assumption: data pointer has the size number of bytes allocated.
-uint8_t* CAN0_ReceiveMessage(uint32_t size){
+void CAN0_ReceiveMessage(uint32_t size, uint8_t* data){
 
   // once we get the size. Allocate the memory on heap and return the pointer
-  uint8_t* data = (uint8_t *)Heap_Malloc(size);
+  //uint8_t* data = (uint8_t *)Heap_Malloc(size);
 
   //uint8_t nr_pckts = (size % 252) ? size/252 : size/252 + 1;
   // we need the data pointer to be big enough to store the data.
-  for(int i = 0; i < size; i++)
+  int i;
+
+  for(i = 0; i < size; i++)
     *(data + i) = CAN_Fifo_Get();
 
-  return data;
+  // Discard the other irrelevent bits in the frame
+  int ceil_size =  ((size % 8 ) == 0)  ? size 
+                                        : (size + 8 - (size %8));
+  for(; i < ceil_size; i++)
+    CAN_Fifo_Get();
+
+  return;
 }
 
 
@@ -384,3 +398,20 @@ int CAN_fifo_frame_put(can_msg_t frame){
   return 1;   // success
 };  
 */
+
+extern uint8_t MailboxDataValid;
+uint8_t can_send_message_timer[CAN_FRAME_SIZE];
+void can_timerproc(void) {
+  if(MailboxDataValid){
+    memset((void *) can_send_message_timer, 0 , CAN_FRAME_SIZE);
+    OS_MailBox_Recv((uint8_t*)can_send_message_timer);
+    CAN0_Setup_Message_Object(CAN_XMT_ID, 
+                              NULL, 
+                              CAN_FRAME_SIZE, 
+                              can_send_message_timer, 
+                              CAN_XMT_ID, 
+                              MSG_OBJ_TYPE_TX); // send
+  }
+
+  return;
+}
